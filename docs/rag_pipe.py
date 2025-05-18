@@ -3,7 +3,7 @@ from langchain_experimental.text_splitter import SemanticChunker
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain.prompts import PromptTemplate
-from langchain_community.llms import Ollama
+from langchain_ollama import OllamaLLM
 from langchain.chains import RetrievalQA
 import logging
 
@@ -95,11 +95,11 @@ except Exception as e:
 
 # Ollama Integration: Connect to LLM server
 try:
-    llm = Ollama(
+    llm = OllamaLLM(
         model="qwen2.5-coder:14b",
         base_url="http://172.20.10.2:11434",
         temperature=0.7,
-        max_tokens=4096
+        num_predict=4096
     )
     logger.info("Connected to Ollama LLM")
 except Exception as e:
