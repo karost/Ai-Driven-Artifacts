@@ -1,0 +1,16 @@
+services:
+  hermes-dev:
+    build:
+      context: .
+      args:
+        - ROOT_PASSWORD=${ROOT_PASSWORD}
+        - THANIT_PASSWORD=${THANIT_PASSWORD}
+    container_name: hermes-dev
+    ports:
+      - "2222:22"
+    volumes:
+      # for windows 11
+      # - C:\hermes_dev:/home/thanit/hermes_dev
+      # for mac
+      - /Users/thanit/hermes_dev:/home/thanit/hermes_dev
+    restart: unless-stopped

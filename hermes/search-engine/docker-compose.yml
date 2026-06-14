@@ -1,0 +1,166 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./searxng:/etc/searxng
+    restart: unless-stopped
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - ./qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+  # ── Firecrawl (self-hosted) ───────────────────────────────────────────
+  # Provides web_extract for Hermes: crawling, structured extraction,
+  # and JavaScript-rendered page content. Paired with SearXNG for search.
+  #
+  # Requires a .env file in this directory with:
+  #   FIRECRAWL_BULL_AUTH_KEY=<random-secret>   (admin UI password)
+  #
+  # API endpoint: http://localhost:3002
+  # Admin UI:     http://localhost:3002/admin/<BULL_AUTH_KEY>/queues
+  #
+  # ── 8 GB VPS: concurrency limits ─────────────────────────────────────
+  # With only ~8 GB total RAM, Playwright (Chromium) is the main risk.
+  # Each tab uses ~200–400 MB; unthrottled, 10 concurrent crawls can OOM
+  # the host.  The settings below cap Firecrawl to 1–2 concurrent crawls
+  # and keep total Firecrawl RAM under ~4 GB:
+  #
+  #   firecrawl-api        → 4 GB limit  (API + worker processes)
+  #   firecrawl-playwright → 2 GB limit  (headless Chromium tabs)
+  #   NUM_WORKERS_PER_QUEUE=2   max parallel workers per queue
+  #   CRAWL_CONCURRENT_REQUESTS=2  max in-flight crawl HTTP requests
+  #   MAX_CONCURRENT_JOBS=2   max simultaneous crawl/scrape jobs
+  #   BROWSER_POOL_SIZE=2   headless browser instances kept warm
+  #   MAX_CONCURRENT_PAGES=2  tabs per Playwright container
+  #   MAX_RAM=0.8   reject new jobs when RAM > 80% of container limit
+  #   MAX_CPU=0.8   reject new jobs when CPU > 80%
+  #
+  # To raise throughput: increase all *2* values to 3 or 4, bump the
+  # Playwright memory limit to 3–4 GB, and raise the API limit to match.
+  # ──────────────────────────────────────────────────────────────────────
+
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    container_name: firecrawl-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3002:3002"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: 3002
+      # ── concurrency limits (tuned for 8 GB host) ──
+      NUM_WORKERS_PER_QUEUE: "2"
+      CRAWL_CONCURRENT_REQUESTS: "2"
+      MAX_CONCURRENT_JOBS: "2"
+      BROWSER_POOL_SIZE: "2"
+      MAX_CPU: "0.8"
+      MAX_RAM: "0.8"
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      NUQ_RABBITMQ_URL: amqp://firecrawl:firecrawl@firecrawl-rabbitmq:5672
+      BULL_AUTH_KEY: ${FIRECRAWL_BULL_AUTH_KEY:-changeme123}
+      USE_DB_AUTHENTICATION: "false"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_HOST: firecrawl-postgres
+      POSTGRES_PORT: "5432"
+      # AI features — point at your local/cloud Ollama for /extract and /scrape with LLM
+      # (optional but recommended for better extraction quality)
+      OPENAI_BASE_URL: http://host.docker.internal:11434/v1
+      MODEL_NAME: ${FIRECRAWL_MODEL_NAME:-qwen3}
+      MODEL_EMBEDDING_NAME: ${FIRECRAWL_EMBED_MODEL:-nomic-embed-text}
+      # SearXNG integration — reuse your existing instance for /search
+      SEARXNG_ENDPOINT: http://searxng:8080
+    depends_on:
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    container_name: firecrawl-playwright
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      BLOCK_MEDIA: "false"
+      MAX_CONCURRENT_PAGES: "2"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2G
+    tmpfs:
+      - /tmp/.cache:noexec,nosuid,size=512m
+
+  firecrawl-redis:
+    image: redis:alpine
+    container_name: firecrawl-redis
+    restart: unless-stopped
+    command: redis-server --bind 0.0.0.0 --maxmemory 256mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: firecrawl-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: firecrawl
+      RABBITMQ_DEFAULT_PASS: firecrawl
+    volumes:
+      - firecrawl-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    container_name: firecrawl-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - ./firecrawl-pgdata:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+volumes:
+  firecrawl-rabbitmq-data:
